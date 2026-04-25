@@ -1,0 +1,62 @@
+name: Badminton Booking – Week Ahead
+
+on:
+  schedule:
+    # 9:59 PM UK time = 20:59 UTC (BST, Apr–Oct) / 21:59 UTC (GMT, Nov–Mar)
+    # Running both so it fires correctly all year round
+    - cron: '59 20 * * *'   # BST (summer)
+    - cron: '59 21 * * *'   # GMT (winter)
+  workflow_dispatch:         # manual trigger from GitHub app / website
+
+jobs:
+  book:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium --with-deps
+
+      - name: Write .env from secrets
+        run: |
+          cat <<EOF > .env
+          BETTER_EMAIL=${{ secrets.BETTER_EMAIL }}
+          BETTER_PASSWORD=${{ secrets.BETTER_PASSWORD }}
+          LOCATION_1=rivermead-leisure-complex
+          LOCATION_2=meadway-sports-centre
+          LOCATION_1_NAME=Rivermead Leisure Centre
+          LOCATION_2_NAME=Meadway Leisure Centre
+          BOOKING_URL=https://bookings.better.org.uk
+          PLAYERS=2
+          BOOKING_OPEN_HOUR=22
+          BOOKING_OPEN_MINUTE=0
+          SLOT_RETRY_ATTEMPTS=3
+          SLOT_RETRY_DELAY_MS=30000
+          EOF
+
+      - name: Run badminton booking
+        run: npx playwright test --grep "book badminton 7 days ahead" --project=chromium
+        env:
+          CI: true
+
+      - name: Upload report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: booking-failure-report
+          path: |
+            test-results/
+            monocart-report/
+          retention-days: 3
