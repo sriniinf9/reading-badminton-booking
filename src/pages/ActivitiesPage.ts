@@ -89,17 +89,21 @@ export class ActivitiesPage extends BasePage {
   }
 
   async navigateToDate(targetDate: Date) {
-    const targetStr = targetDate.toLocaleDateString('en-GB', {
-      weekday: 'long', day: 'numeric', month: 'long',
-    });
-    console.log(`Navigating to date: ${targetStr}`);
+    const yyyy    = targetDate.getFullYear();
+    const mm      = String(targetDate.getMonth() + 1).padStart(2, '0');
+    const dd      = String(targetDate.getDate()).padStart(2, '0');
+    const dateStr = `${yyyy}-${mm}-${dd}`;
 
-    for (let attempt = 0; attempt < 30; attempt++) {
-      const currentText = (await this.selectedDate.textContent()) ?? '';
-      if (currentText.toLowerCase().includes(targetDate.getDate().toString())) break;
-      await this.datePickerNext.click();
-      await this.page.waitForTimeout(300);
-    }
+    // The site uses URL-based date navigation:
+    // /location/{slug}/badminton-60min/{YYYY-MM-DD}/by-time
+    const base        = process.env.BOOKING_URL || 'https://bookings.better.org.uk';
+    const currentUrl  = this.page.url();
+    let   path        = currentUrl.startsWith(base) ? currentUrl.slice(base.length) : currentUrl;
+    path = path.replace(/\/\d{4}-\d{2}-\d{2}.*$/, '');
+
+    console.log(`Navigating to date: ${dateStr}`);
+    await this.navigate(`${path}/${dateStr}/by-time`);
+    await this.page.waitForLoadState('networkidle');
   }
 
   async getAvailableSlots(): Promise<TimeSlot[]> {
