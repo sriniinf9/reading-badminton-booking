@@ -27,12 +27,12 @@ export class HomePage extends BasePage {
 
   async goto() {
     await this.navigate('/');
-    await this.page.waitForLoadState('networkidle');
+    await this.page.waitForLoadState('load');
   }
 
   async goToLocation(locationSlug: string) {
     await this.navigate(`/location/${locationSlug}`);
-    await this.page.waitForLoadState('networkidle');
+    await this.page.waitForLoadState('load');
     console.log(`Navigated to location: ${locationSlug}`);
   }
 
@@ -40,7 +40,7 @@ export class HomePage extends BasePage {
     const card = this.locationCards.filter({ hasText: new RegExp(locationName, 'i') }).first();
     await expect(card).toBeVisible({ timeout: 10000 });
     await card.click();
-    await this.page.waitForLoadState('networkidle');
+    await this.page.waitForLoadState('load');
   }
 
   async getLocationTitle(): Promise<string> {

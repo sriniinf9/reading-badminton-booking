@@ -144,6 +144,8 @@ test.describe('Home Page – Location Selection', () => {
 test.describe('Badminton Booking – Week Ahead', () => {
 
   test('book badminton 7 days ahead', async ({ page }) => {
+    test.setTimeout(10 * 60 * 1000); // 10-minute budget for the full booking flow
+
     const loginPage = new LoginPage(page);
     await loginPage.goto();
     await loginPage.login(EMAIL, PASSWORD);
@@ -151,9 +153,9 @@ test.describe('Badminton Booking – Week Ahead', () => {
     const targetDate = getTargetDate();
     const weekend    = isWeekend(targetDate);
 
-    // Weekend: 5–6 pm; Weekday: 6:40 pm (60-min window for flexibility)
-    const timeFrom  = weekend ? '17:00' : '18:40';
-    const timeTo    = weekend ? '18:00' : '19:00';
+    // Use env-var window if set, otherwise sensible defaults
+    const timeFrom  = process.env.TIME_FROM ?? (weekend ? '17:00' : '18:40');
+    const timeTo    = process.env.TIME_TO   ?? (weekend ? '18:00' : '19:40');
 
     // Rivermead weekday → Court 1 preference; Meadway and weekends → any court
     const locations: Array<{ slug: string; name: string; courtPref?: string }> = [
@@ -171,10 +173,8 @@ test.describe('Badminton Booking – Week Ahead', () => {
       console.log(`\nPre-positioning at ${loc.name}${loc.courtPref ? ` (prefer ${loc.courtPref})` : ''}…`);
 
       try {
-        // Navigate to the timetable page BEFORE slots open so we are ready the instant they do
-        await activitiesPage.goToActivities(loc.slug);
-        await activitiesPage.selectBadminton();
-        await activitiesPage.navigateToDate(targetDate);
+        // Navigate directly to the timetable URL (skips unreliable UI click chain)
+        await activitiesPage.navigateDirectlyToTimetable(loc.slug, targetDate);
 
         // Block here until the booking window opens (no-op if already past open time)
         await waitUntilBookingOpens(page);
@@ -186,9 +186,7 @@ test.describe('Badminton Booking – Week Ahead', () => {
           try {
             if (attempt > 1) {
               console.log(`Retry ${attempt}/${SLOT_RETRY_ATTEMPTS} — refreshing timetable…`);
-              await page.reload();
-              await page.waitForLoadState('networkidle');
-              await activitiesPage.navigateToDate(targetDate);
+              await activitiesPage.navigateDirectlyToTimetable(loc.slug, targetDate);
             }
 
             const bookedSlot = await activitiesPage.bookSlot(timeFrom, timeTo, loc.courtPref);

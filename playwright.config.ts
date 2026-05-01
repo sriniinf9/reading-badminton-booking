@@ -6,6 +6,7 @@ dotenv.config({ path: path.resolve(__dirname, '.env') });
 
 export default defineConfig({
   testDir: './tests',
+  timeout: 600000, // 10 min — booking test waits up to 5 min for window to open + retries
   fullyParallel: false,
   retries: 1,
   workers: 1,

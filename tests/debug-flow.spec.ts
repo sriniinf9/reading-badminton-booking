@@ -8,17 +8,26 @@ const EMAIL    = process.env.BETTER_EMAIL    ?? '';
 const PASSWORD = process.env.BETTER_PASSWORD ?? '';
 
 test('debug: capture page flow screenshots', async ({ page }) => {
+  // Pre-set OneTrust consent cookie to suppress cookie banner
+  await page.context().addCookies([{
+    name: 'OptanonAlertBoxClosed',
+    value: new Date().toISOString(),
+    domain: 'bookings.better.org.uk',
+    path: '/',
+    expires: Math.floor(Date.now() / 1000) + 365 * 24 * 3600,
+  }]);
+
   // Step 1: Home page
   await page.goto('https://bookings.better.org.uk/');
-  await page.waitForLoadState('networkidle');
+  await page.waitForLoadState('load');
   await page.screenshot({ path: 'test-results/debug-01-home.png', fullPage: true });
   console.log('Step 1 URL:', page.url());
   console.log('Step 1 buttons:', await page.locator('button').allTextContents());
 
   // Step 2: Click login button
   const loginBtn = page.getByRole('button', { name: /log in|sign in/i }).first();
-  await loginBtn.click();
-  await page.waitForLoadState('networkidle');
+  await loginBtn.click({ force: true });
+  await page.waitForLoadState('load');
   await page.waitForTimeout(2000);
   await page.screenshot({ path: 'test-results/debug-02-after-login-click.png', fullPage: true });
   console.log('Step 2 URL:', page.url());
@@ -29,8 +38,8 @@ test('debug: capture page flow screenshots', async ({ page }) => {
   await page.locator('input[type="password"]').first().fill(PASSWORD);
   await page.screenshot({ path: 'test-results/debug-03-filled.png' });
 
-  await page.locator('button[type="submit"]').first().click();
-  await page.waitForLoadState('networkidle');
+  await page.locator('input[type="password"]').first().press('Enter');
+  await page.waitForLoadState('load');
   await page.waitForTimeout(3000);
   await page.screenshot({ path: 'test-results/debug-04-after-submit.png', fullPage: true });
   console.log('Step 4 URL:', page.url());
@@ -38,7 +47,7 @@ test('debug: capture page flow screenshots', async ({ page }) => {
 
   // Step 5: Navigate to activities
   await page.goto('https://bookings.better.org.uk/location/rivermead-leisure-complex');
-  await page.waitForLoadState('networkidle');
+  await page.waitForLoadState('load');
   await page.waitForTimeout(2000);
   await page.screenshot({ path: 'test-results/debug-05-activities.png', fullPage: true });
   console.log('Step 5 URL:', page.url());
@@ -50,7 +59,7 @@ test('debug: capture page flow screenshots', async ({ page }) => {
   const sportsHallCount = await sportsHall.count();
   if (sportsHallCount > 0) {
     await sportsHall.click();
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('load');
     await page.waitForTimeout(2000);
     await page.screenshot({ path: 'test-results/debug-06-sports-hall.png', fullPage: true });
     console.log('Step 6 URL:', page.url());

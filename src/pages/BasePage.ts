@@ -19,23 +19,42 @@ export class BasePage {
     this.logoutButton = page.getByRole('button', { name: /log out|sign out/i })
                             .or(page.getByRole('link', { name: /log out|sign out/i }));
 
-    this.cookieBanner = page.locator('#cookie-banner, [data-testid="cookie-banner"], .cookie-consent').first();
-    this.cookieAccept  = page.getByRole('button', { name: /accept all|accept cookies|allow all/i })
+    this.cookieBanner = page.locator('#cookie-banner, [data-testid="cookie-banner"], .cookie-consent, #onetrust-banner-sdk').first();
+    this.cookieAccept  = page.locator('#onetrust-accept-btn-handler')
+                             .or(page.getByRole('button', { name: /accept all|accept cookies|allow all/i }))
                              .or(page.locator('#accept-all-cookies, [data-testid="accept-cookies"]'));
   }
 
   async dismissCookieBanner() {
     try {
-      await this.cookieAccept.click({ timeout: 5000 });
+      // Use JS eval to click through any overlay / iframe boundary
+      await this.page.evaluate(() => {
+        const btn =
+          document.getElementById('onetrust-accept-btn-handler') ??
+          document.querySelector<HTMLElement>('.onetrust-accept-btn-handler') ??
+          Array.from(document.querySelectorAll<HTMLElement>('button')).find(
+            b => /accept all/i.test(b.textContent ?? '')
+          );
+        btn?.click();
+      });
+      // Wait for the OneTrust SDK container to disappear
+      await this.page.locator('#onetrust-consent-sdk').waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
     } catch {
-      // banner not present — continue
+      // no banner — continue
     }
   }
 
   async navigate(path = '') {
     const base = process.env.BOOKING_URL || 'https://bookings.better.org.uk';
+    // Pre-set OneTrust consent cookie so the banner never renders
+    await this.page.context().addCookies([{
+      name: 'OptanonAlertBoxClosed',
+      value: new Date().toISOString(),
+      domain: new URL(base).hostname,
+      path: '/',
+      expires: Math.floor(Date.now() / 1000) + 365 * 24 * 3600,
+    }]);
     await this.page.goto(`${base}${path}`);
-    await this.dismissCookieBanner();
   }
 
   async isLoggedIn(): Promise<boolean> {
