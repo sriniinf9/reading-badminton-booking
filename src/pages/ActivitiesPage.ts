@@ -79,13 +79,25 @@ export class ActivitiesPage extends BasePage {
     const mm      = String(targetDate.getMonth() + 1).padStart(2, '0');
     const dd      = String(targetDate.getDate()).padStart(2, '0');
     const dateStr = `${yyyy}-${mm}-${dd}`;
-    const url     = `/location/${locationSlug}/badminton-60min/${dateStr}/by-time`;
-    console.log(`Navigating directly to timetable: ${url}`);
-    await this.navigate(url);
-    await this.page.waitForLoadState('load');
-    if (!this.page.url().includes(dateStr)) {
-      throw new Error(`Timetable navigation failed — got: ${this.page.url()}`);
+
+    // Try known URL patterns for Better.org.uk badminton timetables
+    const candidates = [
+      `/location/${locationSlug}/badminton-60min/${dateStr}/by-time`,
+      `/location/${locationSlug}/sports-hall-activities/badminton-60min/${dateStr}/by-time`,
+      `/location/${locationSlug}/badminton/${dateStr}/by-time`,
+    ];
+
+    for (const url of candidates) {
+      console.log(`Trying timetable URL: ${url}`);
+      await this.navigate(url);
+      await this.page.waitForLoadState('load');
+      if (this.page.url().includes(dateStr)) {
+        console.log(`Timetable loaded: ${this.page.url()}`);
+        return;
+      }
+      console.log(`Redirected away from ${dateStr} — got: ${this.page.url()}`);
     }
+    throw new Error(`Timetable navigation failed for all URL patterns — last URL: ${this.page.url()}`);
   }
 
   async selectBadminton() {
@@ -262,6 +274,15 @@ export class ActivitiesPage extends BasePage {
       console.log(`No "${courtPref}" slot found, retrying without court preference…`);
       return this.bookSlot(timeFrom, timeTo, undefined);
     }
+
+    // Dump diagnostics to help debug selector mismatches
+    const allLinks = await this.page.locator('a, button').count();
+    const pageTitle = await this.page.title();
+    console.error(`[bookSlot] FAILED — URL: ${this.page.url()}`);
+    console.error(`[bookSlot] Page title: "${pageTitle}"`);
+    console.error(`[bookSlot] Total links+buttons on page: ${allLinks}`);
+    const pageText = await this.page.locator('body').innerText().catch(() => '').then(t => t.slice(0, 500));
+    console.error(`[bookSlot] Page text (first 500 chars): ${pageText}`);
 
     throw new Error(`No slots available between ${timeFrom}–${timeTo}`);
   }

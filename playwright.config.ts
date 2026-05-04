@@ -21,7 +21,7 @@ export default defineConfig({
 
   use: {
     baseURL: process.env.BOOKING_URL || 'https://bookings.better.org.uk',
-    headless: !!process.env.CI,
+    headless: process.env.HEADLESS !== 'false',
     viewport: { width: 1280, height: 800 },
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',

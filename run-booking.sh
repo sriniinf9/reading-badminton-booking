@@ -5,7 +5,6 @@
 # If the whole run exits non-zero, this script retries up to MAX_RETRIES times
 # (covers total failure or crash before the in-test retry logic could run).
 
-export DISPLAY=:99         # virtual display provided by xvfb-run below
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG="$PROJECT_DIR/booking-cron.log"
 NPX=/home/sk27/.npm-global/bin/npx
@@ -19,7 +18,7 @@ for attempt in $(seq 1 $MAX_RETRIES); do
   echo "--- Attempt $attempt of $MAX_RETRIES ($(date '+%H:%M:%S')) ---" >> "$LOG"
 
   cd "$PROJECT_DIR"
-  xvfb-run --auto-servernum $NPX playwright test --grep "book badminton 7 days ahead" --project=chromium >> "$LOG" 2>&1
+  $NPX playwright test --grep "book badminton 7 days ahead" --project=chromium >> "$LOG" 2>&1
   EXIT_CODE=$?
 
   if [ $EXIT_CODE -eq 0 ]; then
