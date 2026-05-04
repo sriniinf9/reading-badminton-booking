@@ -23,6 +23,7 @@ for attempt in $(seq 1 $MAX_RETRIES); do
 
   if [ $EXIT_CODE -eq 0 ]; then
     echo "SUCCESS on attempt $attempt at $(date '+%H:%M:%S')" >> "$LOG"
+    bash "$PROJECT_DIR/publish-report.sh" || true
     if grep -q "^CONFLUENCE_URL=" "$PROJECT_DIR/.env" 2>/dev/null; then
       node "$PROJECT_DIR/publish-confluence.js" >> "$LOG" 2>&1 || true
     fi
@@ -38,6 +39,9 @@ for attempt in $(seq 1 $MAX_RETRIES); do
 done
 
 echo "All $MAX_RETRIES attempts failed. Run end: $(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG"
+
+# Always publish the report (shows failed result too)
+bash "$PROJECT_DIR/publish-report.sh" || true
 
 # Publish summary to Confluence (only if credentials are configured)
 if grep -q "^CONFLUENCE_URL=" "$PROJECT_DIR/.env" 2>/dev/null; then
