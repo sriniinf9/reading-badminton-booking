@@ -8,6 +8,9 @@ on:
     - cron: '59 21 * * *'   # GMT (winter)
   workflow_dispatch:         # manual trigger from GitHub app / website
 
+permissions:
+  contents: write
+
 jobs:
   book:
     runs-on: ubuntu-latest
@@ -60,3 +63,11 @@ jobs:
             test-results/
             monocart-report/
           retention-days: 3
+
+      - name: Publish report to GitHub Pages
+        if: always()
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./monocart-report
+          publish_branch: gh-pages
