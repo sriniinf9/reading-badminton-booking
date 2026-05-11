@@ -16,7 +16,7 @@ const LOC2_NAME  = process.env.LOCATION_2_NAME ?? 'Meadway Leisure Centre';
 
 const BOOKING_OPEN_HOUR   = parseInt(process.env.BOOKING_OPEN_HOUR   ?? '22');
 const BOOKING_OPEN_MINUTE = parseInt(process.env.BOOKING_OPEN_MINUTE ?? '0');
-const SLOT_RETRY_ATTEMPTS = parseInt(process.env.SLOT_RETRY_ATTEMPTS ?? '3');
+const SLOT_RETRY_ATTEMPTS = parseInt(process.env.SLOT_RETRY_ATTEMPTS ?? '2');
 const SLOT_RETRY_DELAY_MS = parseInt(process.env.SLOT_RETRY_DELAY_MS ?? '30000');
 
 // Always target exactly 7 days from today
@@ -39,7 +39,7 @@ async function waitUntilBookingOpens(page: { waitForTimeout: (ms: number) => Pro
   open.setHours(BOOKING_OPEN_HOUR, BOOKING_OPEN_MINUTE, 2, 0); // +2 s buffer
 
   const waitMs = open.getTime() - now.getTime();
-  if (waitMs > 0 && waitMs <= 5 * 60 * 1000) {
+  if (waitMs > 0 && waitMs <= 10 * 60 * 1000) {
     console.log(
       `Pre-positioned. Waiting ${Math.ceil(waitMs / 1000)}s for slots to open ` +
       `at ${BOOKING_OPEN_HOUR}:${String(BOOKING_OPEN_MINUTE).padStart(2, '0')}…`
@@ -144,7 +144,7 @@ test.describe('Home Page – Location Selection', () => {
 test.describe('Badminton Booking – Week Ahead', () => {
 
   test('book badminton 7 days ahead', async ({ page }) => {
-    test.setTimeout(10 * 60 * 1000); // 10-minute budget for the full booking flow
+    test.setTimeout(45 * 60 * 1000); // 45-minute budget: up to 5 min wait + retries + networkidle waits
 
     const loginPage = new LoginPage(page);
     await loginPage.goto();
@@ -170,24 +170,26 @@ test.describe('Badminton Booking – Week Ahead', () => {
     const activitiesPage = new ActivitiesPage(page);
 
     for (const loc of locations) {
+      if (page.isClosed()) break;
       console.log(`\nPre-positioning at ${loc.name}${loc.courtPref ? ` (prefer ${loc.courtPref})` : ''}…`);
 
       try {
-        // Navigate directly to the timetable URL (skips unreliable UI click chain)
-        await activitiesPage.navigateDirectlyToTimetable(loc.slug, targetDate);
+        // Pre-position on TODAY's timetable — the 7-day-ahead URL redirects to today
+        // until 22:00, so we park here and wait for the window to open.
+        const today = new Date();
+        await activitiesPage.navigateDirectlyToTimetable(loc.slug, today);
 
-        // Block here until the booking window opens (no-op if already past open time)
+        // Block here until the booking window opens (no-op if already past 22:00).
+        // The 7-day slot is only available for ~5-10 min starting at 22:00.
         await waitUntilBookingOpens(page);
 
-        // Retry the slot grab — the page is refreshed between attempts to pick up
-        // newly-opened slots in case the first grab fires fractionally too early
+        // Each attempt navigates fresh to the target date so we pick up slots
+        // the moment they go live.
         let booked = false;
         for (let attempt = 1; attempt <= SLOT_RETRY_ATTEMPTS; attempt++) {
           try {
-            if (attempt > 1) {
-              console.log(`Retry ${attempt}/${SLOT_RETRY_ATTEMPTS} — refreshing timetable…`);
-              await activitiesPage.navigateDirectlyToTimetable(loc.slug, targetDate);
-            }
+            console.log(`Attempt ${attempt}/${SLOT_RETRY_ATTEMPTS} — navigating to target date…`);
+            await activitiesPage.navigateDirectlyToTimetable(loc.slug, targetDate);
 
             const bookedSlot = await activitiesPage.bookSlot(timeFrom, timeTo, loc.courtPref);
             console.log(`Slot selected at ${loc.name}: ${bookedSlot}`);
@@ -204,7 +206,8 @@ test.describe('Badminton Booking – Week Ahead', () => {
             console.warn(`Attempt ${attempt} failed at ${loc.name}: ${(slotErr as Error).message}`);
             if (attempt < SLOT_RETRY_ATTEMPTS) {
               console.log(`Waiting ${SLOT_RETRY_DELAY_MS / 1000}s before retry…`);
-              await page.waitForTimeout(SLOT_RETRY_DELAY_MS);
+              await page.waitForTimeout(SLOT_RETRY_DELAY_MS).catch(() => {});
+              if (page.isClosed()) break;
             }
           }
         }

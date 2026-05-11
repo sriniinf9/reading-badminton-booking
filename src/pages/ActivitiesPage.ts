@@ -82,20 +82,31 @@ export class ActivitiesPage extends BasePage {
 
     // Try known URL patterns for Better.org.uk badminton timetables
     const candidates = [
+      `/location/${locationSlug}/badminton-40min/${dateStr}/by-time`,
       `/location/${locationSlug}/badminton-60min/${dateStr}/by-time`,
-      `/location/${locationSlug}/sports-hall-activities/badminton-60min/${dateStr}/by-time`,
-      `/location/${locationSlug}/badminton/${dateStr}/by-time`,
+      `/location/${locationSlug}/badminton-sessions/${dateStr}/by-time`,
+      `/location/${locationSlug}/sports-hall-activities/badminton-40min/${dateStr}/by-time`,
     ];
 
     for (const url of candidates) {
       console.log(`Trying timetable URL: ${url}`);
       await this.navigate(url);
       await this.page.waitForLoadState('load');
-      if (this.page.url().includes(dateStr)) {
-        console.log(`Timetable loaded: ${this.page.url()}`);
-        return;
+      // SPA: wait for JS to hydrate before inspecting the URL or content
+      await this.page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+      await this.page.waitForSelector('a, button', { timeout: 15000 }).catch(() => {});
+      if (!this.page.url().includes(dateStr)) {
+        console.log(`Redirected away from ${dateStr} — got: ${this.page.url()}`);
+        continue;
       }
-      console.log(`Redirected away from ${dateStr} — got: ${this.page.url()}`);
+      // Reject SPA 404 pages (URL matches but content is an error page)
+      const bodyText = await this.page.locator('body').innerText().catch(() => '');
+      if (/gone offside|doesn't exist|not found|404/i.test(bodyText)) {
+        console.log(`404 error page at ${url} — skipping`);
+        continue;
+      }
+      console.log(`Timetable loaded: ${this.page.url()}`);
+      return;
     }
     throw new Error(`Timetable navigation failed for all URL patterns — last URL: ${this.page.url()}`);
   }
@@ -204,69 +215,43 @@ export class ActivitiesPage extends BasePage {
 
   async bookSlot(timeFrom: string, timeTo: string, courtPref?: string): Promise<string> {
     await this.page.waitForLoadState('load');
+    // SPA: ensure React has rendered before scanning for slots
+    await this.page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
 
     const [fromH, fromM] = timeFrom.split(':').map(Number);
     const [toH, toM]     = timeTo.split(':').map(Number);
     const fromMins = (fromH ?? 0) * 60 + (fromM ?? 0);
     const toMins   = (toH ?? 0)   * 60 + (toM ?? 0);
 
-    // Strategy A: find "Book" links and walk up the DOM to check time + court
-    const bookLinks = this.page.getByRole('link', { name: /book/i })
-      .or(this.page.getByRole('button', { name: /book/i }));
+    // Available slots are <a href="…/slot/HH:MM-HH:MM/id"> in the Shadow DOM.
+    // Fully-booked slots are <button> with no href. Nav links go to /redirect-to-selected-venue.
+    // Using href*="/slot/" pinpoints only bookable slots without touching nav or booked buttons.
+    const slotLinks = this.page.locator('a[href*="/slot/"]');
+    const slotCount = await slotLinks.count();
+    console.log(`Found ${slotCount} available slot links`);
 
-    const bookCount = await bookLinks.count();
-    console.log(`Found ${bookCount} "Book" links on page`);
+    for (let i = 0; i < slotCount; i++) {
+      const link = slotLinks.nth(i);
+      const href  = (await link.getAttribute('href').catch(() => '')) ?? '';
 
-    for (let i = 0; i < bookCount; i++) {
-      const link = bookLinks.nth(i);
-      const containerText = await link.evaluate((el: Element) => {
-        let node: Element | null = el;
-        for (let d = 0; d < 8; d++) {
-          node = node?.parentElement ?? null;
-          if (!node) break;
-          const t = node.textContent?.trim() ?? '';
-          if (/\d{1,2}:\d{2}/.test(t) && t.length < 600) return t;
-        }
-        return '';
-      });
-
-      const timeMatch = containerText.match(/(\d{1,2}):(\d{2})/);
+      // Time is embedded in the href: …/slot/08:00-08:40/id
+      const timeMatch = href.match(/\/slot\/(\d{1,2}:\d{2})-(\d{1,2}:\d{2})\//);
       if (!timeMatch) continue;
-      const slotMins = parseInt(timeMatch[1]!) * 60 + parseInt(timeMatch[2]!);
+      const [startH, startM] = timeMatch[1]!.split(':').map(Number);
+      const slotMins = (startH ?? 0) * 60 + (startM ?? 0);
       if (slotMins < fromMins || slotMins > toMins) continue;
-      if (courtPref && !containerText.toLowerCase().includes(courtPref.toLowerCase())) continue;
 
-      const label = `${timeMatch[0]}${courtPref ? ` @ ${courtPref}` : ''}`;
-      console.log(`Booking slot: ${label}`);
+      // Court preference: check the slot card's visible text
+      if (courtPref) {
+        const cardText = (await link.textContent().catch(() => '')) ?? '';
+        if (!cardText.toLowerCase().includes(courtPref.toLowerCase())) continue;
+      }
+
+      const label = `${timeMatch[1]}${courtPref ? ` @ ${courtPref}` : ''}`;
+      console.log(`Booking slot: ${label} (${href})`);
       await link.click();
       await this.page.waitForLoadState('load');
       return label;
-    }
-
-    // Strategy B: the entire slot card may itself be a link containing the time
-    if (bookCount === 0) {
-      const slotCards = this.page.locator('a, button').filter({
-        hasText: /\d{1,2}:\d{2}/,
-        hasNot:  this.page.locator('[class*="unavailable"], [class*="booked"], [class*="sold-out"]'),
-      });
-      const cardCount = await slotCards.count();
-      console.log(`Strategy B: found ${cardCount} time-bearing slot cards`);
-
-      for (let i = 0; i < cardCount; i++) {
-        const card = slotCards.nth(i);
-        const text = (await card.textContent().catch(() => '')) ?? '';
-        const timeMatch = text.match(/(\d{1,2}):(\d{2})/);
-        if (!timeMatch) continue;
-        const slotMins = parseInt(timeMatch[1]!) * 60 + parseInt(timeMatch[2]!);
-        if (slotMins < fromMins || slotMins > toMins) continue;
-        if (courtPref && !text.toLowerCase().includes(courtPref.toLowerCase())) continue;
-
-        const label = `${timeMatch[0]}${courtPref ? ` @ ${courtPref}` : ''}`;
-        console.log(`Booking slot (B): ${label}`);
-        await card.click();
-        await this.page.waitForLoadState('load');
-        return label;
-      }
     }
 
     // No court-pref match — retry without preference
@@ -275,14 +260,13 @@ export class ActivitiesPage extends BasePage {
       return this.bookSlot(timeFrom, timeTo, undefined);
     }
 
-    // Dump diagnostics to help debug selector mismatches
-    const allLinks = await this.page.locator('a, button').count();
+    // Diagnostics
     const pageTitle = await this.page.title();
+    const pageText  = await this.page.locator('body').innerText().catch(() => '').then(t => t.slice(0, 500));
     console.error(`[bookSlot] FAILED — URL: ${this.page.url()}`);
     console.error(`[bookSlot] Page title: "${pageTitle}"`);
-    console.error(`[bookSlot] Total links+buttons on page: ${allLinks}`);
-    const pageText = await this.page.locator('body').innerText().catch(() => '').then(t => t.slice(0, 500));
-    console.error(`[bookSlot] Page text (first 500 chars): ${pageText}`);
+    console.error(`[bookSlot] Available slot links found: ${slotCount}`);
+    console.error(`[bookSlot] Page text: ${pageText}`);
 
     throw new Error(`No slots available between ${timeFrom}–${timeTo}`);
   }

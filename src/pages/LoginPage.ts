@@ -30,6 +30,9 @@ export class LoginPage extends BasePage {
 
   async goto() {
     await this.navigate('/');
+    await this.dismissCookieBanner();
+    // Wait only for the login button itself — avoids slow networkidle on the SPA homepage
+    await this.loginLink.waitFor({ state: 'visible', timeout: 15000 });
     await this.loginLink.click({ force: true });
     await expect(this.submitButton).toBeVisible({ timeout: 15000 });
   }
