@@ -4,9 +4,25 @@ import sys
 import time
 from datetime import datetime, timedelta
 
-from playwright.sync_api import sync_playwright, Page, BrowserContext, expect
+import requests
+from bs4 import BeautifulSoup
 
-# ── Config from environment ───────────────────────────────────────────────────
+# Load .env from the project root so the script works when run directly too
+def _load_dotenv() -> None:
+    env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+    try:
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, val = line.split('=', 1)
+                os.environ.setdefault(key.strip(), val.strip().strip('"').strip("'"))
+    except FileNotFoundError:
+        pass
+
+_load_dotenv()
+
 BASE_URL          = os.environ.get('BOOKING_URL', 'https://bookings.better.org.uk')
 EMAIL             = os.environ['BETTER_EMAIL']
 PASSWORD          = os.environ['BETTER_PASSWORD']
@@ -19,230 +35,256 @@ BOOKING_OPEN_MIN  = int(os.environ.get('BOOKING_OPEN_MINUTE', '0'))
 RETRY_ATTEMPTS    = int(os.environ.get('SLOT_RETRY_ATTEMPTS', '3'))
 RETRY_DELAY_S     = int(os.environ.get('SLOT_RETRY_DELAY_MS', '30000')) // 1000
 
+HEADERS = {
+    'User-Agent': (
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
+        '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+    ),
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-GB,en;q=0.9',
+}
+
+TIMETABLE_SLUGS_40MIN = ['badminton-40min', 'badminton-sessions']
+TIMETABLE_SLUGS_60MIN = ['badminton-60min', 'badminton-sessions']
+
 
 def get_target_date() -> datetime:
     return datetime.now() + timedelta(days=7)
 
 
 def is_weekend(date: datetime) -> bool:
-    return date.weekday() >= 5  # 5=Sat, 6=Sun
+    return date.weekday() >= 5
 
 
-def wait_until_booking_opens(page: Page) -> None:
+def wait_until_booking_opens() -> None:
     now = datetime.now()
     open_time = now.replace(hour=BOOKING_OPEN_HOUR, minute=BOOKING_OPEN_MIN, second=2, microsecond=0)
     wait_secs = (open_time - now).total_seconds()
     if 0 < wait_secs <= 10 * 60:
-        print(f'Pre-positioned. Waiting {int(wait_secs)}s for booking window to open '
-              f'at {BOOKING_OPEN_HOUR:02d}:{BOOKING_OPEN_MIN:02d}...')
-        page.wait_for_timeout(int(wait_secs * 1000))
+        print(f'Waiting {int(wait_secs)}s for booking window at '
+              f'{BOOKING_OPEN_HOUR:02d}:{BOOKING_OPEN_MIN:02d}…')
+        time.sleep(wait_secs)
         print('Booking window open — attempting now.')
 
 
-def set_consent_cookie(context: BrowserContext) -> None:
-    hostname = re.sub(r'^https?://', '', BASE_URL).split('/')[0]
-    context.add_cookies([{
-        'name': 'OptanonAlertBoxClosed',
-        'value': datetime.now().isoformat(),
-        'domain': hostname,
-        'path': '/',
-        'expires': int(time.time()) + 365 * 24 * 3600,
-    }])
+def make_session() -> requests.Session:
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    session.cookies.set(
+        'OptanonAlertBoxClosed',
+        datetime.now().isoformat(),
+        domain='bookings.better.org.uk',
+    )
+    return session
 
 
-def navigate(page: Page, path: str = '') -> None:
-    page.goto(f'{BASE_URL}{path}')
+def _csrf(soup: BeautifulSoup) -> str | None:
+    meta = soup.find('meta', {'name': re.compile(r'csrf.token', re.I)})
+    if meta:
+        return meta.get('content')
+    inp = soup.find('input', {'name': re.compile(r'csrf|_token|authenticity_token', re.I)})
+    if inp:
+        return inp.get('value')
+    return None
 
 
-def dismiss_cookie_banner(page: Page) -> None:
+def login(session: requests.Session) -> None:
+    r = session.get(f'{BASE_URL}/')
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, 'html.parser')
+    csrf = _csrf(soup)
+
+    # NextAuth credentials flow (Next.js apps)
     try:
-        page.evaluate("""() => {
-            const btn =
-                document.getElementById('onetrust-accept-btn-handler') ??
-                document.querySelector('.onetrust-accept-btn-handler') ??
-                Array.from(document.querySelectorAll('button')).find(
-                    b => /accept all/i.test(b.textContent ?? '')
-                );
-            if (btn) btn.click();
-        }""")
-        page.locator('#onetrust-consent-sdk').wait_for(state='hidden', timeout=5000)
+        cr = session.get(f'{BASE_URL}/api/auth/csrf', timeout=10)
+        if cr.status_code == 200:
+            csrf = cr.json().get('csrfToken', csrf)
     except Exception:
         pass
 
+    payload: dict = {'email': EMAIL, 'password': PASSWORD, 'callbackUrl': BASE_URL}
+    if csrf:
+        payload['csrfToken'] = csrf
 
-def login(page: Page) -> None:
-    navigate(page, '/')
-    dismiss_cookie_banner(page)
+    session.post(
+        f'{BASE_URL}/api/auth/signin/credentials',
+        data={**payload, 'json': 'true'},
+        allow_redirects=True,
+        timeout=20,
+    )
 
-    login_btn = page.get_by_role('button', name=re.compile(r'log in|sign in', re.I)).first
-    login_btn.wait_for(state='visible', timeout=15000)
-    login_btn.click(force=True)
-
-    email_field = page.locator(
-        'input[type="email"], input[name="email"], input[id*="email"], '
-        'input[id*="username"], input[id*="member"]'
-    ).first
-    email_field.wait_for(state='visible', timeout=15000)
-    email_field.fill(EMAIL)
-
-    password_field = page.locator('input[type="password"]').first
-    password_field.fill(PASSWORD)
-    password_field.press('Enter')
-    page.wait_for_load_state('load')
-
-    error_loc = page.locator(
-        '[data-testid="login-error"], .error-message, .alert-danger, [role="alert"]'
-    ).first
-    if error_loc.is_visible():
-        msg = error_loc.text_content() or ''
-        raise RuntimeError(f'Login failed: {msg.strip()}')
-
-    # Modal closes when email field disappears
-    email_field.wait_for(state='hidden', timeout=20000)
+    # Verify session
+    r = session.get(f'{BASE_URL}/', timeout=15)
+    soup = BeautifulSoup(r.text, 'html.parser')
+    authenticated = bool(
+        soup.find(string=re.compile(r'log out|sign out|my account|hi,', re.I)) or
+        soup.find(attrs={'data-testid': re.compile(r'user|account|logout', re.I)})
+    )
+    if not authenticated:
+        raise RuntimeError('Login failed — could not verify authenticated session')
     print('Logged in successfully')
 
 
-def navigate_to_timetable(page: Page, location_slug: str, target_date: datetime) -> None:
-    date_str = target_date.strftime('%Y-%m-%d')
-    candidates = [
-        f'/location/{location_slug}/badminton-40min/{date_str}/by-time',
-        f'/location/{location_slug}/badminton-60min/{date_str}/by-time',
-        f'/location/{location_slug}/badminton-sessions/{date_str}/by-time',
-        f'/location/{location_slug}/sports-hall-activities/badminton-40min/{date_str}/by-time',
-    ]
-    for url in candidates:
-        print(f'Trying timetable URL: {url}')
-        navigate(page, url)
-        page.wait_for_load_state('load')
+def get_timetable(session: requests.Session, location_slug: str, date: datetime, slugs: list[str] | None = None) -> tuple[str, str]:
+    """Return (html, final_url) for the first working timetable URL."""
+    date_str = date.strftime('%Y-%m-%d')
+    for slug in (slugs or TIMETABLE_SLUGS_40MIN):
+        url = f'{BASE_URL}/location/{location_slug}/{slug}/{date_str}/by-time'
+        print(f'Trying timetable URL: /location/{location_slug}/{slug}/{date_str}/by-time')
         try:
-            page.wait_for_load_state('networkidle', timeout=30000)
-        except Exception:
-            pass
-        try:
-            page.wait_for_selector('a, button', timeout=15000)
-        except Exception:
-            pass
-        if date_str not in page.url:
-            print(f'Redirected away from {date_str} — got: {page.url}')
+            r = session.get(url, timeout=20, allow_redirects=True)
+        except requests.RequestException as e:
+            print(f'  Request failed: {e}')
             continue
-        body = page.locator('body').inner_text()
-        if re.search(r"gone offside|doesn't exist|not found|404", body, re.I):
-            print(f'404 error page at {url} — skipping')
+        if date_str not in r.url:
+            print(f'  Redirected away — got: {r.url}')
             continue
-        print(f'Timetable loaded: {page.url}')
-        return
-    raise RuntimeError(
-        f'Timetable navigation failed for all URL patterns — last URL: {page.url}'
-    )
+        if re.search(r"gone offside|doesn't exist|not found|404", r.text, re.I):
+            print(f'  404 page — skipping')
+            continue
+        print(f'Timetable loaded: {r.url}')
+        return r.text, r.url
+    raise RuntimeError(f'No working timetable URL found for {location_slug} on {date_str}')
 
 
-def book_slot(page: Page, time_from: str, time_to: str, court_pref: str | None = None) -> str:
-    page.wait_for_load_state('load')
-    try:
-        page.wait_for_load_state('networkidle', timeout=20000)
-    except Exception:
-        pass
-
+def find_slots(html: str, time_from: str, time_to: str, court_pref: str | None) -> list[str]:
+    """Return href paths for slots whose start time falls within [time_from, time_to]."""
+    soup = BeautifulSoup(html, 'html.parser')
     from_h, from_m = map(int, time_from.split(':'))
     to_h, to_m     = map(int, time_to.split(':'))
     from_mins = from_h * 60 + from_m
     to_mins   = to_h   * 60 + to_m
 
-    slot_links = page.locator('a[href*="/slot/"]')
-    slot_count = slot_links.count()
-    print(f'Found {slot_count} available slot links')
-
-    for i in range(slot_count):
-        link = slot_links.nth(i)
-        href = link.get_attribute('href') or ''
+    results: list[str] = []
+    for a in soup.find_all('a', href=re.compile(r'/slot/')):
+        href = a['href']
+        # href format: /location/.../slot/HH:MM-HH:MM/<id>
         m = re.search(r'/slot/(\d{1,2}:\d{2})-(\d{1,2}:\d{2})/', href)
         if not m:
             continue
-        start_h, start_m = map(int, m.group(1).split(':'))
-        slot_mins = start_h * 60 + start_m
-        if slot_mins < from_mins or slot_mins > to_mins:
+        sh, sm = map(int, m.group(1).split(':'))
+        slot_start = sh * 60 + sm
+        # Accept slots whose START TIME is anywhere in [from, to]
+        if slot_start < from_mins or slot_start > to_mins:
             continue
-        if court_pref:
-            card_text = link.text_content() or ''
-            if court_pref.lower() not in card_text.lower():
-                continue
-        label = m.group(1) + (f' @ {court_pref}' if court_pref else '')
-        print(f'Booking slot: {label} ({href})')
-        link.click()
-        page.wait_for_load_state('load')
-        return label
+        if court_pref and court_pref.lower() not in (a.get_text() or '').lower():
+            continue
+        results.append(href)
 
     # Retry without court preference if nothing matched
-    if court_pref:
-        print(f'No "{court_pref}" slot found, retrying without court preference...')
-        return book_slot(page, time_from, time_to, None)
+    if not results and court_pref:
+        print(f'No "{court_pref}" slot found, retrying without court preference…')
+        return find_slots(html, time_from, time_to, None)
 
-    # Diagnostics on failure
-    print(f'[book_slot] FAILED — URL: {page.url}')
-    print(f'[book_slot] Page title: "{page.title()}"')
-    print(f'[book_slot] Body (first 500): {page.locator("body").inner_text()[:500]}')
-    raise RuntimeError(f'No slots available between {time_from}–{time_to}')
+    return results
 
 
-def add_to_basket_and_checkout(page: Page) -> None:
-    add_btn = page.get_by_role(
-        'button', name=re.compile(r'add to basket|add to cart|book', re.I)
-    ).first
-    add_btn.wait_for(state='visible', timeout=10000)
-    add_btn.click()
-    page.wait_for_load_state('load')
+def book_slot(session: requests.Session, slot_href: str) -> str:
+    url = slot_href if slot_href.startswith('http') else f'{BASE_URL}{slot_href}'
+    r = session.get(url, timeout=20, allow_redirects=True)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, 'html.parser')
+
+    # Find "Add to basket" form/button
+    form = soup.find('form', string=re.compile(r'add to basket|add to cart|book', re.I))
+    if not form:
+        form = soup.find('form', action=re.compile(r'basket|cart|book', re.I))
+    if not form:
+        # Try button inside any form
+        btn = soup.find('button', string=re.compile(r'add to basket|add to cart|book', re.I))
+        if btn:
+            form = btn.find_parent('form')
+
+    if not form:
+        raise RuntimeError(f'Could not find basket form on slot page: {r.url}')
+
+    action = form.get('action', '')
+    action_url = action if action.startswith('http') else f'{BASE_URL}{action}'
+    method = (form.get('method') or 'post').lower()
+    data = {inp['name']: inp.get('value', '') for inp in form.find_all('input', attrs={'name': True})}
+
+    fn = session.post if method == 'post' else session.get
+    r = fn(action_url, data=data, timeout=20, allow_redirects=True)
+    r.raise_for_status()
     print('Added to basket')
 
-    checkout_btn = page.get_by_role(
-        'button', name=re.compile(r'checkout|proceed to checkout', re.I)
-    ).or_(
-        page.get_by_role('link', name=re.compile(r'checkout', re.I))
-    ).first
-    checkout_btn.wait_for(state='visible', timeout=10000)
-    checkout_btn.click()
-    page.wait_for_load_state('load')
-    try:
-        page.wait_for_load_state('networkidle', timeout=15000)
-    except Exception:
-        pass
+    m = re.search(r'/slot/(\d{1,2}:\d{2})', slot_href)
+    return m.group(1) if m else slot_href
+
+
+def checkout(session: requests.Session) -> None:
+    r = session.get(f'{BASE_URL}/basket', timeout=20, allow_redirects=True)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, 'html.parser')
+
+    form = soup.find('form', action=re.compile(r'checkout|payment', re.I))
+    if not form:
+        btn = soup.find('button', string=re.compile(r'checkout|proceed', re.I))
+        if btn:
+            form = btn.find_parent('form')
+
+    if not form:
+        raise RuntimeError('Could not find checkout form in basket page')
+
+    action = form.get('action', '/checkout')
+    action_url = action if action.startswith('http') else f'{BASE_URL}{action}'
+    method = (form.get('method') or 'post').lower()
+    data = {inp['name']: inp.get('value', '') for inp in form.find_all('input', attrs={'name': True})}
+
+    fn = session.post if method == 'post' else session.get
+    r = fn(action_url, data=data, timeout=20, allow_redirects=True)
+    r.raise_for_status()
     print('Proceeding to checkout')
 
 
-def confirm_booking(page: Page) -> str:
-    confirm_btn = page.get_by_role(
-        'button', name=re.compile(r'confirm booking|confirm|pay now|complete', re.I)
-    ).first
-    confirm_btn.wait_for(state='visible', timeout=15000)
+def confirm_booking(session: requests.Session) -> str:
+    r = session.get(session.get_redirect_target() if hasattr(session, 'get_redirect_target') else f'{BASE_URL}/checkout', timeout=20, allow_redirects=True)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, 'html.parser')
 
-    # Tick any required unchecked checkboxes (T&Cs etc.) that gate the button
-    checkboxes = page.locator('input[type="checkbox"]')
-    for i in range(checkboxes.count()):
-        cb = checkboxes.nth(i)
-        if cb.is_visible() and not cb.is_checked():
-            cb.check()
-            print(f'Checked checkbox {i}')
+    # Tick any unchecked required checkboxes (T&Cs) if they appear in a form
+    confirm_form = None
+    for form in soup.find_all('form'):
+        btn = form.find('button', string=re.compile(r'confirm|pay now|complete', re.I))
+        if btn:
+            confirm_form = form
+            break
 
-    expect(confirm_btn).to_be_enabled(timeout=10000)
-    confirm_btn.click()
+    if not confirm_form:
+        raise RuntimeError('Could not find confirmation form on checkout page')
 
-    page.get_by_text(
-        re.compile(r'booking confirmed|booking successful|thank you', re.I)
-    ).first.wait_for(timeout=20000)
+    action = confirm_form.get('action', '')
+    action_url = action if action.startswith('http') else f'{BASE_URL}{action}'
+    method = (confirm_form.get('method') or 'post').lower()
+    data = {inp['name']: inp.get('value', '') for inp in confirm_form.find_all('input', attrs={'name': True})}
 
-    ref_loc = page.locator(
-        '[data-testid="booking-ref"], .booking-reference, .confirmation-number'
-    ).first
-    ref = ref_loc.text_content() if ref_loc.is_visible() else 'N/A'
+    fn = session.post if method == 'post' else session.get
+    r = fn(action_url, data=data, timeout=30, allow_redirects=True)
+    r.raise_for_status()
+
+    if not re.search(r'booking confirmed|booking successful|thank you', r.text, re.I):
+        raise RuntimeError('Confirmation page not reached after form submit')
+
+    soup = BeautifulSoup(r.text, 'html.parser')
+    ref_tag = soup.find(attrs={'class': re.compile(r'booking.ref|confirmation.number', re.I)})
+    ref = ref_tag.get_text(strip=True) if ref_tag else 'N/A'
     print(f'Booking confirmed! Reference: {ref}')
-    return (ref or 'N/A').strip()
+    return ref
 
 
 def run() -> None:
     target_date = get_target_date()
     weekend     = is_weekend(target_date)
 
-    time_from = os.environ.get('TIME_FROM', '17:00' if weekend else '18:40')
-    time_to   = os.environ.get('TIME_TO',   '18:00' if weekend else '19:40')
+    # Weekend: 1-hour session 17:00–18:00; Weekday: 40-min session 18:40–19:20
+    if weekend:
+        time_from   = '17:00'
+        time_to     = '18:00'
+        timetable_slugs = TIMETABLE_SLUGS_60MIN
+    else:
+        time_from   = '18:40'
+        time_to     = '19:20'
+        timetable_slugs = TIMETABLE_SLUGS_40MIN
 
     locations = [
         {'slug': LOCATION_1, 'name': LOC1_NAME, 'court_pref': None if weekend else 'Court 1'},
@@ -253,52 +295,49 @@ def run() -> None:
     print(f'\nTarget: {day_label} ({"Weekend" if weekend else "Weekday"})')
     print(f'Time window: {time_from} – {time_to}')
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context()
-        set_consent_cookie(context)
-        page = context.new_page()
+    session = make_session()
+    login(session)
 
+    # Pre-position: load today's timetable before the booking window opens
+    for loc in locations:
         try:
-            login(page)
+            get_timetable(session, loc['slug'], datetime.now(), timetable_slugs)
+            break
+        except Exception:
+            pass
 
-            for loc in locations:
-                print(f'\nPre-positioning at {loc["name"]}...')
-                try:
-                    navigate_to_timetable(page, loc['slug'], datetime.now())
-                    wait_until_booking_opens(page)
+    wait_until_booking_opens()
 
-                    booked = False
-                    for attempt in range(1, RETRY_ATTEMPTS + 1):
-                        try:
-                            print(f'Attempt {attempt}/{RETRY_ATTEMPTS} — navigating to target date...')
-                            navigate_to_timetable(page, loc['slug'], target_date)
-                            slot = book_slot(page, time_from, time_to, loc['court_pref'])
-                            print(f'Slot selected at {loc["name"]}: {slot}')
-                            add_to_basket_and_checkout(page)
-                            ref = confirm_booking(page)
-                            print(f'Booking confirmed at {loc["name"]}! Reference: {ref}')
-                            booked = True
-                            break
-                        except Exception as e:
-                            print(f'Attempt {attempt} failed at {loc["name"]}: {e}')
-                            if attempt < RETRY_ATTEMPTS:
-                                print(f'Waiting {RETRY_DELAY_S}s before retry...')
-                                time.sleep(RETRY_DELAY_S)
+    for loc in locations:
+        print(f'\nPre-positioning at {loc["name"]}…')
+        for attempt in range(1, RETRY_ATTEMPTS + 1):
+            try:
+                print(f'Attempt {attempt}/{RETRY_ATTEMPTS} — navigating to target date…')
+                html, _ = get_timetable(session, loc['slug'], target_date, timetable_slugs)
+                slots = find_slots(html, time_from, time_to, loc['court_pref'])
+                print(f'Found {len(slots)} available slot(s)')
+                if not slots:
+                    raise RuntimeError(f'No slots available between {time_from}–{time_to}')
 
-                    if booked:
-                        return
+                slot_href = slots[0]
+                print(f'Booking slot: {slot_href}')
+                booked_time = book_slot(session, slot_href)
+                print(f'Slot selected at {loc["name"]}: {booked_time}')
 
-                except Exception as e:
-                    print(f'Navigation failed for {loc["name"]}: {e}')
+                checkout(session)
+                ref = confirm_booking(session)
+                print(f'Booking confirmed at {loc["name"]}! Reference: {ref}')
+                return
 
-            raise RuntimeError(
-                f'No badminton slots available at any location for {day_label} ({time_from}–{time_to})'
-            )
+            except Exception as e:
+                print(f'Attempt {attempt} failed at {loc["name"]}: {e}')
+                if attempt < RETRY_ATTEMPTS:
+                    print(f'Waiting {RETRY_DELAY_S}s before retry…')
+                    time.sleep(RETRY_DELAY_S)
 
-        finally:
-            context.close()
-            browser.close()
+    raise RuntimeError(
+        f'No badminton slots booked at any location for {day_label} ({time_from}–{time_to})'
+    )
 
 
 if __name__ == '__main__':
