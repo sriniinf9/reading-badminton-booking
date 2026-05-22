@@ -2,10 +2,7 @@ name: Badminton Booking – Week Ahead
 
 on:
   schedule:
-    # 9:59 PM UK time = 20:59 UTC (BST, Apr–Oct) / 21:59 UTC (GMT, Nov–Mar)
-    # Running both so it fires correctly all year round
-    - cron: '59 20 * * *'   # BST (summer)
-    - cron: '59 21 * * *'   # GMT (winter)
+    - cron: '59 21 * * *'
   workflow_dispatch:         # manual trigger from GitHub app / website
 
 jobs:
