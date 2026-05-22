@@ -31,9 +31,6 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - name: Install Playwright Chromium
-        run: playwright install chromium --with-deps
-
       - name: Run badminton booking
         run: python book_badminton.py
         env:
