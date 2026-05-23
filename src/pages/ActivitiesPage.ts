@@ -280,11 +280,28 @@ export class ActivitiesPage extends BasePage {
     await expect(this.checkoutButton).toBeVisible({ timeout: 10000 });
     await this.checkoutButton.click();
     await this.page.waitForLoadState('load');
+    await this.page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
     console.log('Proceeding to checkout');
   }
 
   async confirmBooking(): Promise<string> {
-    await expect(this.confirmButton).toBeVisible({ timeout: 10000 });
+    await this.confirmButton.waitFor({ state: 'visible', timeout: 15000 });
+
+    // Tick any unchecked checkboxes (T&C, consent) that gate the Pay Now button
+    const checkboxes = this.page.locator('input[type="checkbox"]');
+    const cbCount = await checkboxes.count();
+    for (let i = 0; i < cbCount; i++) {
+      const cb = checkboxes.nth(i);
+      const visible = await cb.isVisible().catch(() => false);
+      const checked = await cb.isChecked().catch(() => true);
+      if (visible && !checked) {
+        await cb.check().catch(() => {});
+        console.log(`Checked checkbox ${i}`);
+      }
+    }
+
+    // Wait for the button to become enabled after checking any required boxes
+    await expect(this.confirmButton).toBeEnabled({ timeout: 10000 });
     await this.confirmButton.click();
 
     await expect(this.bookingConfirmation).toBeVisible({ timeout: 20000 });
